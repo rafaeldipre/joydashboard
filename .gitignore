@@ -1,0 +1,23 @@
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual env
+.venv/
+venv/
+
+# Pillow / cairosvg temp
+*.ico
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/
