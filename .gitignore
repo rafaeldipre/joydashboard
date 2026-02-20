@@ -15,6 +15,9 @@ venv/
 # Pillow / cairosvg temp
 *.ico
 
+# Capturas temporales
+_tmp_*.py
+
 # IDE
 .vscode/
 .idea/
