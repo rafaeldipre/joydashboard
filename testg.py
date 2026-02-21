@@ -1,9 +1,11 @@
 import base64
 import sys
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk
 
 import pygame
+
+VERSION = "1.1.0"
 
 # ── Icono embebido (PNG 64×64, CC0 – uxwing.com) ────────────────────────────
 _ICON_B64 = (
@@ -40,11 +42,10 @@ THEMES = {
 class JoyTesterApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("JoyDashboard")
+        self.root.title(f"JoyDashboard v{VERSION}")
 
         # ── Icono de ventana ─────────────────────────────────────────────────
         try:
-            icon_data = base64.b64decode(_ICON_B64)
             icon_img = tk.PhotoImage(data=_ICON_B64)
             self.root.iconphoto(True, icon_img)
         except Exception:
@@ -54,12 +55,8 @@ class JoyTesterApp:
         pygame.init()
         pygame.joystick.init()
 
-        if pygame.joystick.get_count() == 0:
-            raise RuntimeError(
-                "No se detectó ningún joystick/gamepad. Conéctalo e inténtalo de nuevo."
-            )
-
         self.joy = None
+        self.joy_instance_id = None
         self.num_axes = 0
         self.num_buttons = 0
         self.num_hats = 0
@@ -84,14 +81,19 @@ class JoyTesterApp:
         self.right = ttk.Frame(main)
         self.right.pack(side="left", fill="both", expand=True, padx=(12, 0))
 
-        self.status = tk.StringVar(value="Listo")
+        self.status = tk.StringVar(value="Esperando dispositivo...")
         self.status_bar = tk.Label(
             root, textvariable=self.status, anchor="w",
             padx=10, pady=6,
         )
         self.status_bar.pack(fill="x")
 
-        self._select_joystick(0)
+        # Conectar al primer joystick si ya hay uno, o mostrar espera
+        if pygame.joystick.get_count() > 0:
+            self._select_joystick(0)
+        else:
+            self._show_waiting_state()
+
         self._refresh_colors()
         self.root.after(16, self.update_loop)
 
@@ -156,7 +158,8 @@ class JoyTesterApp:
         self.joy_selector = ttk.Combobox(
             sel_row, values=joy_names, state="readonly", width=44
         )
-        self.joy_selector.current(0)
+        if joy_names:
+            self.joy_selector.current(0)
         self.joy_selector.pack(side="left", padx=(6, 20))
         self.joy_selector.bind(
             "<<ComboboxSelected>>",
@@ -194,14 +197,80 @@ class JoyTesterApp:
         self.lbl_info = ttk.Label(header, text="")
         self.lbl_info.pack(anchor="w")
 
+    # ── Hot-plug ─────────────────────────────────────────────────────────────
+
+    def _refresh_joy_selector(self):
+        """Actualiza la lista de joysticks en el combobox."""
+        joy_names = [
+            pygame.joystick.Joystick(i).get_name()
+            for i in range(pygame.joystick.get_count())
+        ]
+        self.joy_selector["values"] = joy_names
+        if not joy_names:
+            self.joy_selector.set("")
+
+    def _on_joystick_added(self, device_index: int):
+        """Llamado cuando se conecta un nuevo joystick."""
+        self._refresh_joy_selector()
+        if self.joy is None:
+            self._select_joystick(device_index)
+            count = pygame.joystick.get_count()
+            if 0 <= device_index < count:
+                self.joy_selector.current(device_index)
+
+    def _on_joystick_removed(self, instance_id: int):
+        """Llamado cuando se desconecta un joystick."""
+        self._refresh_joy_selector()
+        if self.joy_instance_id == instance_id:
+            try:
+                self.joy.quit()
+            except Exception:
+                pass
+            self.joy = None
+            self.joy_instance_id = None
+
+            if pygame.joystick.get_count() > 0:
+                self._select_joystick(0)
+                self.joy_selector.current(0)
+            else:
+                self._show_waiting_state()
+
+    def _show_waiting_state(self):
+        """Muestra pantalla de espera cuando no hay joystick conectado."""
+        for w in self.left.winfo_children():
+            w.destroy()
+        for w in self.right.winfo_children():
+            w.destroy()
+
+        self.axis_vals.clear()
+        self.axis_bars.clear()
+        self.hat_vals.clear()
+        self.btn_labels.clear()
+
+        self.lbl_name.config(text="Sin dispositivo conectado")
+        self.lbl_info.config(text="")
+        self.status.set("Esperando joystick/gamepad...")
+
+        waiting_frm = ttk.Frame(self.right)
+        waiting_frm.pack(expand=True, fill="both")
+        ttk.Label(
+            waiting_frm,
+            text="Conecta un joystick o gamepad para comenzar",
+            font=("Segoe UI", 13),
+        ).pack(expand=True)
+
     # ── Lógica de joystick ───────────────────────────────────────────────────
 
     def _select_joystick(self, idx: int):
         if self.joy is not None:
-            self.joy.quit()
+            try:
+                self.joy.quit()
+            except Exception:
+                pass
 
         self.joy = pygame.joystick.Joystick(idx)
         self.joy.init()
+        self.joy_instance_id = self.joy.get_instance_id()
 
         self.num_axes    = self.joy.get_numaxes()
         self.num_buttons = self.joy.get_numbuttons()
@@ -325,41 +394,53 @@ class JoyTesterApp:
     # ── Loop principal ───────────────────────────────────────────────────────
 
     def update_loop(self):
-        pygame.event.pump()
+        # Procesar eventos pygame para detectar conexión/desconexión
+        for event in pygame.event.get():
+            if event.type == pygame.JOYDEVICEADDED:
+                self._on_joystick_added(event.device_index)
+            elif event.type == pygame.JOYDEVICEREMOVED:
+                self._on_joystick_removed(event.instance_id)
+
+        # Si no hay joystick activo, solo esperar
+        if self.joy is None:
+            self.root.after(16, self.update_loop)
+            return
+
         deadzone = self.deadzone_var.get()
 
-        for i in range(self.num_axes):
-            v = float(self.joy.get_axis(i))
-            if abs(v) < deadzone:
-                v = 0.0
-            self.axis_vals[i].set(f"{v:+.3f}")
-            self.axis_bars[i]["value"] = int((v + 1.0) * 1000)
+        try:
+            for i in range(self.num_axes):
+                v = float(self.joy.get_axis(i))
+                if abs(v) < deadzone:
+                    v = 0.0
+                self.axis_vals[i].set(f"{v:+.3f}")
+                self.axis_bars[i]["value"] = int((v + 1.0) * 1000)
 
-        for i in range(self.num_hats):
-            self.hat_vals[i].set(str(self.joy.get_hat(i)))
+            for i in range(self.num_hats):
+                self.hat_vals[i].set(str(self.joy.get_hat(i)))
 
-        pressed_count = 0
-        btn_on  = self.theme["btn_on"]
-        btn_off = self.theme["btn_off"]
-        btn_fg  = self.theme["btn_fg"]
-        for i in range(self.num_buttons):
-            if self.joy.get_button(i):
-                pressed_count += 1
-                self.btn_labels[i].configure(bg=btn_on,  fg="#ffffff")
-            else:
-                self.btn_labels[i].configure(bg=btn_off, fg=btn_fg)
+            pressed_count = 0
+            btn_on  = self.theme["btn_on"]
+            btn_off = self.theme["btn_off"]
+            btn_fg  = self.theme["btn_fg"]
+            for i in range(self.num_buttons):
+                if self.joy.get_button(i):
+                    pressed_count += 1
+                    self.btn_labels[i].configure(bg=btn_on,  fg="#ffffff")
+                else:
+                    self.btn_labels[i].configure(bg=btn_off, fg=btn_fg)
 
-        self.status.set(f"Botones presionados: {pressed_count} / {self.num_buttons}")
+            self.status.set(f"Botones presionados: {pressed_count} / {self.num_buttons}")
+        except Exception:
+            # El joystick puede haberse desconectado; el evento JOYDEVICEREMOVED lo manejará
+            pass
+
         self.root.after(16, self.update_loop)
 
 
 def main():
     root = tk.Tk()
-    try:
-        app = JoyTesterApp(root)
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
-        sys.exit(1)
+    app = JoyTesterApp(root)
     root.minsize(900, 520)
     root.mainloop()
 
